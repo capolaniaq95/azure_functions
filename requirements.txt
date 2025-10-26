@@ -5,3 +5,14 @@
 azure-functions
 msal
 requests
+azure-storage-queue
+pdfplumber
+bcrypt==4.0.1
+passlib
+python-multipart
+xmltodict
+pandas
+PyPDF2
+pymupdf
+pycryptodome
+bs4
