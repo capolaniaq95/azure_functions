@@ -5,8 +5,8 @@ from msal import PublicClientApplication
 import json
 from datetime import datetime
 from notifications.extract_notificacions import extract_notification_email
-from statements.extract_statements import parse_credit_card_statement, \
-    parse_savings_statement, parse_credit_statement
+from payments.extract_payments import get_html_payment
+from invoices.extract_invoice_attachment import get_from_attachment, extract_invoice_from_pdf, extract_enel_invoice
 import base64
 from keys import *
 
@@ -48,20 +48,20 @@ def auth(req: func.HttpRequest, queue_device_flow: func.Out[str]) -> func.HttpRe
         return func.HttpResponse(f"Error durante autenticación: {str(e)}", status_code=500)
 
 
-@app.function_name(name="get_meesages")
+@app.function_name(name="get_messages")
 @app.queue_trigger(arg_name="queue_device_flow", queue_name="auth-state-queue",
                    connection="AzureWebJobsStorage")
 @app.blob_output(arg_name="notificationsBlob",
-                 path="messages/notifications.json",
+                 path="messages/notifications_{datetime}.json",
                  connection="AzureWebJobsStorage")
 @app.blob_output(arg_name="invoicesBlob",
-                 path="messages/invoices.json",
+                 path="messages/invoices_{datetime}.json",
                  connection="AzureWebJobsStorage")
 @app.blob_output(arg_name="statementsBlob",
-                 path="messages/statements.json",
+                 path="messages/statements_{datetime}.json",
                  connection="AzureWebJobsStorage")
 @app.blob_output(arg_name="paymentsBlob",
-                 path="messages/payments.json",
+                 path="messages/payments_{datetime}.json",
                  connection="AzureWebJobsStorage")
 @app.queue_output(arg_name="notifications_queue", queue_name="notifications-queue",
                   connection="AzureWebJobsStorage")
@@ -78,7 +78,7 @@ def get_messages(queue_device_flow: func.QueueMessage,
                 paymentsBlob: func.Out[str],
                 notifications_queue: func.Out[str], 
                 invoices_queue: func.Out[str],
-                payments_queue: func.Out[str], 
+                payments_queue: func.Out[str],
                 statements_queue: func.Out[str]) -> None:
     logging.info("Intentando obtener carpetas de correo...")
     today = datetime.today().strftime('%Y-%m-%d')
@@ -218,81 +218,108 @@ def extract_notifications(notifications_queue: func.QueueMessage, inputBlob: str
         logging.error(f"Error procesando notificaciones: {str(e)}")
 
 
-@app.function_name(name="get_bank_statement")
-@app.queue_trigger(arg_name="statements_queue", queue_name="statements-queue",
-                  connection="AzureWebJobsStorage")
+@app.function_name(name="extract_payments")
+@app.queue_trigger(arg_name="payments_queue", queue_name="payments-queue",
+                   connection="AzureWebJobsStorage")
 @app.blob_input(arg_name="inputBlob",
-                path="messages/statements.json",
+                path="messages/payments.json",
                 connection="AzureWebJobsStorage")
 @app.blob_output(arg_name="outputBlob",
-                 path="processed-data/bank_statements_{datetime}.json",
+                 path="processed-data/extracted_payments_{datetime}.json",
                  connection="AzureWebJobsStorage")
-@app.blob_output(arg_name="raw_data", path="raw-data/{name}", 
-                 connection="AzureWebJobsStorage")
-def get_bank_statement(statements_queue: func.QueueMessage, inputBlob: str, outputBlob: func.Out[str], 
-                       raw_data: func.Out[bytes]) -> None:
+def extract_payments(payments_queue: func.QueueMessage, inputBlob: str, 
+                     outputBlob: func.Out[str]) -> None:
     """
-    Retrieve and parse bank statement from email attachments.
-
+        Function to extract payment information from email messages.
     Args:
-        message_id: Email message ID
-        headers: Request headers
-
+        payments_queue (func.QueueMessage): Queue message containing headers for authentication.
+        inputBlob (str): Blob input containing raw email messages in JSON format.
+        outputBlob (func.Out[str]): Blob output to store extracted payment information in JSON format.
     Returns:
-        Parsed statement data or empty dict on failure
+        None
     """
-    logging.info("Procesando extractos bancarios...")
+    logging.info("Procesando pagos...")
     try:
-        headers = json.loads(statements_queue.get_body().decode('utf-8'))
-        statements_data = json.loads(inputBlob)
+        headers = json.loads(payments_queue.get_body().decode('utf-8'))
+        payments_data = json.loads(inputBlob)
+        logging.info(f"Número de pagos a procesar: {len(payments_data)}")
+        extracted_data = []
+        for msg in payments_data:
+            id = msg.get('id')
+            info = get_html_payment(id, headers)
+            if info:
+                logging.info(f"Pago extraído para mensaje ID: {id}")
+                extracted_data.append(info)
         
-
-        bank_statements = []
-        logging.info(f"lenght of attachments {len(statements_data)}")
-        for statement in statements_data:
-            logging.info(f"Procesando mensaje ID: {statement.get('id')}, Asunto: {statement.get('subject')}, Adjuntos: {statement.get('attachments')}, Remitente: {statement.get('sender')}")
-            message_id = statement.get('id')
-            url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/attachments"
-            response = requests.get(url, headers=headers)
-            
-            if response.status_code != 200:
-                logging.error(f"Failed to fetch attachments: {response.status_code}")
-                return None
-
-            attachments = response.json().get('value', [])
-
-
-            for attachment in attachments:
-                content_type = attachment.get('contentType')
-                if content_type in ('application/pdf', 'application/octet-stream'):
-                    name = attachment['name']
-                    logging.info(f"name: {name}")
-                    encoded = attachment['contentBytes']
-                    
-                    decoded_data = base64.b64decode(encoded)
-
-                    raw_data.set(decoded_data)
-
-                    #path = f"../attachments/pdf_files/{name}"
-                    #decode_and_save_attachment(encoded, path)
-
-                    if 'TARJETA' in name:
-                        bank_statement = parse_credit_card_statement(decoded_data, password='1026291584')
-                        bank_statements.append(bank_statement)
-                    elif 'CTA' in name:
-                        bank_statement= parse_savings_statement(decoded_data, password='1026291584')
-                        bank_statements.append(bank_statement)
-                    elif 'CREDITO' in name:
-                        bank_statement = parse_credit_statement(decoded_data, password='1026291584')
-                        bank_statements.append(bank_statement)
-        
-        if len(bank_statements) == 0:
-            logging.info("No bank statements were extracted.")
-            return
-
-        outputBlob.set(json.dumps(bank_statements))
-        logging.info(f"Extracted {len(bank_statements)} bank statements.")
-
+        outputBlob.set(json.dumps(extracted_data))
+        logging.info(f"Extraídos {len(extracted_data)} pagos.")
     except Exception as e:
-        logging.error(f"Error in get_bank_statement: {e}")
-        return {}
+        logging.error(f"Error procesando pagos: {str(e)}")
+
+
+@app.function_name(name="extract_invoices")
+@app.queue_trigger(arg_name="invoices_queue", queue_name="invoices-queue",
+                   connection="AzureWebJobsStorage")
+@app.blob_input(arg_name="inputBlob",
+                path="messages/invoices.json",
+                connection="AzureWebJobsStorage")
+@app.blob_output(arg_name="outputBlob",
+                 path="processed-data/extracted_invoices_{datetime}.json",
+                 connection="AzureWebJobsStorage")
+@app.blob_output(arg_name="attachmentsBlob",
+                 path="raw-data/invoice_attachments_{datetime}",
+                 connection="AzureWebJobsStorage")
+def extract_invoices(invoices_queue: func.QueueMessage, inputBlob: str, 
+                     outputBlob: func.Out[str], attachmentsBlob: func.Out[str]) -> None:
+    """
+        Function to extract invoice information from email messages.
+    Args:
+        invoices_queue (func.QueueMessage): Queue message containing headers for authentication.
+        inputBlob (str): Blob input containing raw email messages in JSON format.
+        outputBlob (func.Out[str]): Blob output to store extracted invoice information in JSON format.
+        attachmentsBlob (func.Out[str]): Blob output to store raw attachments.
+    Returns:
+        None
+    """
+    logging.info("Procesando facturas...")
+    try:
+        headers = json.loads(invoices_queue.get_body().decode('utf-8'))
+        invoices_data = json.loads(inputBlob)
+        logging.info(f"Número de facturas a procesar: {len(invoices_data)}")
+        extracted_data = []
+        for msg in invoices_data:
+            id = msg.get('id')
+            subject = msg.get('subject')
+            attachments = msg.get('attachments', False)
+            if 'Enel Colombia' in subject:
+                info = extract_enel_invoice(id, headers)
+            elif attachments:
+                #info = extract_invoice(id, headers)
+                #info.update({'subject': subject, 'ID_email': id})
+                path = f"https://graph.microsoft.com/v1.0/me/messages/{id}/attachments"
+                response = requests.get(path, headers=headers)
+                if response.status_code == 200:
+                    
+                    attachments = response.json()['value']
+                    
+                    for attachment in attachments:
+                        name = attachment['name']
+                        attachment_encode = attachment['contentBytes']
+                        if (attachment['contentType'] == "application/zip" or \
+                            attachment['contentType'] == "application/octet-stream") and name[-3:] == "zip":
+                            attachmentsBlob.set(base64.b64decode(attachment_encode))
+
+                            #info = get_from_attachment(path_attachment=path_attachment)
+                            extracted_data.append({})
+                        elif (attachment['contentType'] == 'application/pdf' or \
+                              attachment['contentType'] == "application/octet-stream") and name[-3:] == "pdf":
+                            attachmentsBlob.set(base64.b64decode(attachment_encode))
+                            password = "1026291584"
+                            #info = extract_invoice_from_pdf(path_attachment, password)
+                            extracted_data.append({})
+
+        
+        outputBlob.set(json.dumps(extracted_data))
+        logging.info(f"Extraídas {len(extracted_data)} facturas.")
+    except Exception as e:
+        logging.error(f"Error procesando facturas: {str(e)}")
