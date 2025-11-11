@@ -6,8 +6,8 @@ import json
 from datetime import datetime
 from notifications.extract_notificacions import extract_notification_email
 from payments.extract_payments import get_html_payment
-from invoices.extract_invoice_attachment import get_from_attachment, extract_invoice_from_pdf, extract_enel_invoice
-import base64
+from invoices.extract_invoice_attachment import extract_enel_invoice
+from invoices.get_attachment_invoices import extract_invoice
 from keys import *
 
 
@@ -52,16 +52,16 @@ def auth(req: func.HttpRequest, queue_device_flow: func.Out[str]) -> func.HttpRe
 @app.queue_trigger(arg_name="queue_device_flow", queue_name="auth-state-queue",
                    connection="AzureWebJobsStorage")
 @app.blob_output(arg_name="notificationsBlob",
-                 path="messages/notifications_{datetime}.json",
+                 path="messages/notifications.json",
                  connection="AzureWebJobsStorage")
 @app.blob_output(arg_name="invoicesBlob",
-                 path="messages/invoices_{datetime}.json",
+                 path="messages/invoices.json",
                  connection="AzureWebJobsStorage")
 @app.blob_output(arg_name="statementsBlob",
-                 path="messages/statements_{datetime}.json",
+                 path="messages/statements.json",
                  connection="AzureWebJobsStorage")
 @app.blob_output(arg_name="paymentsBlob",
-                 path="messages/payments_{datetime}.json",
+                 path="messages/payments.json",
                  connection="AzureWebJobsStorage")
 @app.queue_output(arg_name="notifications_queue", queue_name="notifications-queue",
                   connection="AzureWebJobsStorage")
@@ -184,6 +184,7 @@ def get_messages(queue_device_flow: func.QueueMessage,
         logging.error("Error obteniendo token: %s", str(e))
         return
 
+
 @app.function_name(name="extract_notifications")
 @app.queue_trigger(arg_name="notifications_queue", queue_name="notifications-queue",
                    connection="AzureWebJobsStorage")
@@ -294,30 +295,9 @@ def extract_invoices(invoices_queue: func.QueueMessage, inputBlob: str,
             if 'Enel Colombia' in subject:
                 info = extract_enel_invoice(id, headers)
             elif attachments:
-                #info = extract_invoice(id, headers)
-                #info.update({'subject': subject, 'ID_email': id})
-                path = f"https://graph.microsoft.com/v1.0/me/messages/{id}/attachments"
-                response = requests.get(path, headers=headers)
-                if response.status_code == 200:
-                    
-                    attachments = response.json()['value']
-                    
-                    for attachment in attachments:
-                        name = attachment['name']
-                        attachment_encode = attachment['contentBytes']
-                        if (attachment['contentType'] == "application/zip" or \
-                            attachment['contentType'] == "application/octet-stream") and name[-3:] == "zip":
-                            attachmentsBlob.set(base64.b64decode(attachment_encode))
-
-                            #info = get_from_attachment(path_attachment=path_attachment)
-                            extracted_data.append({})
-                        elif (attachment['contentType'] == 'application/pdf' or \
-                              attachment['contentType'] == "application/octet-stream") and name[-3:] == "pdf":
-                            attachmentsBlob.set(base64.b64decode(attachment_encode))
-                            password = "1026291584"
-                            #info = extract_invoice_from_pdf(path_attachment, password)
-                            extracted_data.append({})
-
+                info = extract_invoice(id, headers)
+                info.update({'subject': subject, 'ID_email': id})
+            extracted_data.append(info)
         
         outputBlob.set(json.dumps(extracted_data))
         logging.info(f"Extraídas {len(extracted_data)} facturas.")

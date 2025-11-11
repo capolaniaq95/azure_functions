@@ -44,6 +44,8 @@ def extract_enel_invoice(email_id: str, headers: Dict[str, str]) -> Optional[Dic
     Returns:
         A dictionary with extracted values or None if extraction fails.
     """
+    logger.info(f"Extracting Enel invoice from email ID: {email_id}")
+
     url = f"{GRAPH_API_BASE_URL}/{email_id}"
     try:
         response = requests.get(url, headers=headers)
@@ -77,6 +79,8 @@ def extract_enel_invoice(email_id: str, headers: Dict[str, str]) -> Optional[Dic
 
 def _extract_product_info(product: Dict[str, Any]) -> Dict[str, Any]:
     """Helper function to extract product information from XML product dict."""
+
+    logging.info("Extracting product information from XML")
     product_dict = {}
 
     # Extract product ID
@@ -128,6 +132,7 @@ def get_from_xml(xml_data: Dict[str, Any]) -> InvoiceData:
     Raises:
         ValueError: If required fields are missing or invalid.
     """
+    logging.info("Extracting invoice data from XML")
     try:
         invoice = xml_data['Invoice']
         period = invoice['ext:UBLExtensions']['ext:UBLExtension'][0]['ext:ExtensionContent']['sts:DianExtensions']['sts:InvoiceControl']['sts:AuthorizationPeriod']
@@ -167,6 +172,8 @@ def get_from_attachment(path_attachment: Optional[str] = None, path_xml: Optiona
     Raises:
         ValueError: If file processing fails.
     """
+    logging.info("Extracting invoice data from attachment or XML file")
+
     if path_attachment:
         try:
             with zipfile.ZipFile(path_attachment, 'r') as zip_file:
@@ -199,6 +206,17 @@ def get_from_attachment(path_attachment: Optional[str] = None, path_xml: Optiona
 
 
 def _extract_alkosto_invoice(pdf_path: str, password: str) -> Dict[str, str]:
+    """
+    Extracts invoice information from an Alkosto PDF file.
+    Args:
+        pdf_path: Path to the PDF file.
+        password: Password for encrypted PDFs.
+    Returns:
+        A dictionary with extracted invoice information.
+    """
+
+    logging.info(f"Extracting Alkosto invoice from PDF: {pdf_path}")
+
     reader = PdfReader(pdf_path)
     info = {}
     if reader.is_encrypted:
@@ -258,6 +276,16 @@ def _extract_english_pdf(pdf_path, password):
         return {}
 
 def _extract_with_pypdf2(pdf_path, password):
+    """
+    Function to extract invoice information from a PDF using PyPDF2.
+    Args:
+        pdf_path: Path to the PDF file.
+        password: Password for encrypted PDFs.
+    Returns:
+        A dictionary with extracted invoice information.
+    """
+
+    logging.info(f"Extracting invoice from PDF using PyPDF2: {pdf_path}")
 
     info = {}
     reader = PdfReader(pdf_path)
@@ -291,6 +319,8 @@ def _extract_with_pypdf2(pdf_path, password):
     return {}
 
 def _extract_with_fitz(pdf_path, password):
+    logging.info(f"Extracting invoice from PDF using fitz: {pdf_path}")
+
     doc = fitz.open(pdf_path)
     if doc.is_encrypted:
         if not password:
@@ -302,18 +332,17 @@ def _extract_with_fitz(pdf_path, password):
     for page in doc:
         all_text += page.get_text() + "\n"
 
-    total_lines = []
     for line in all_text.split('\n'):
         cleaned_line = line.replace(' ', '').lower()
-        if "total" in cleaned_line:
-            if '$' not in line:
-                total_lines.append(line)
-            else:
-                return line.split("$")
-        elif '$' in line and total_lines:
-            total_lines.append(line)
-            return total_lines
-    return total_lines if total_lines else None
+        if "total" in cleaned_line and '$' in line:
+            value = line.split("$")[-1].strip()
+            return {"Total": value}
+
+        if "date" in cleaned_line:
+            date = line.split()[-1].strip()
+            return {"Date": date}
+
+    return {}
 
 
 def extract_invoice_from_pdf(pdf_path: str, password: Optional[str] = None) -> Optional[List[str]]:
